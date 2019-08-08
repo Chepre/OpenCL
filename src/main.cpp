@@ -1,73 +1,94 @@
-#include <stdio.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <memory>
 #include <stdlib.h>
-#include <time.h>
-#include <CL/cl.h>
-#define MAX_SOURCE_SIZE (0x100000)
+#include <CL/cl.hpp>
 
-int main() 
+
+int main( int argc, char** argv ) 
 {
-  cl_device_id device_id = NULL;
-  cl_context context = NULL;
-  cl_command_queue command_queue = NULL;
-  cl_mem memobj = NULL;
-  cl_program program = NULL;
-  cl_kernel kernel = NULL;
-  cl_platform_id platform_id = NULL;
-  cl_uint ret_num_devices;
-  cl_uint ret_num_platforms;
-  cl_int ret;
+    const 	int N_ELEMENTS=1024*1024;
+    unsigned 	int platform_id=0, device_id=0;
 
-  cl_ulong val[1];
+    try{
+        std::unique_ptr<int[]> A(new int[N_ELEMENTS]); // Or you can use simple dynamic arrays like: int* A = new int[N_ELEMENTS];
+        std::unique_ptr<int[]> B(new int[N_ELEMENTS]);
+        std::unique_ptr<int[]> C(new int[N_ELEMENTS]);
 
-  FILE *fp;
-  char fileName[] = "./kernel/sum.cl";
-  char *source_str;
-  size_t source_size;
+        for( int i = 0; i < N_ELEMENTS; ++i ) {
+            A[i] = i;
+            B[i] = i;
+        }
 
-  fp = fopen(fileName, "r");
-  if (!fp) {
-    fprintf(stderr, "Failed to load kernel\n");
-    exit(1);
-  }
+        // Query for platforms
+        std::vector<cl::Platform> platforms;
+        cl::Platform::get(&platforms);
 
-  source_str = (char*)malloc(MAX_SOURCE_SIZE);
-  source_size = fread(source_str, 1, MAX_SOURCE_SIZE, fp);
-  fclose(fp);
+        // Get a list of devices on this platform
+        std::vector<cl::Device> devices;
+        platforms[platform_id].getDevices(CL_DEVICE_TYPE_GPU|CL_DEVICE_TYPE_CPU, &devices); // Select the platform.
 
-  ret = clGetPlatformIDs(1, &platform_id, &ret_num_platforms);
-  ret = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, &ret_num_devices);
+        // Create a context
+        cl::Context context(devices);
 
-  context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
-  command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
-  memobj = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_mem), NULL, &ret);
-  program = clCreateProgramWithSource(context, 1, (const char **)&source_str, (const size_t *)&source_size, &ret);
-  ret = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
-  kernel = clCreateKernel(program, "hello", &ret);
+        // Create a command queue
+        cl::CommandQueue queue = cl::CommandQueue( context, devices[device_id] );   // Select the device.
 
-  ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void*)&memobj);
+        // Create the memory buffers
+        cl::Buffer bufferA=cl::Buffer(context, CL_MEM_READ_ONLY, N_ELEMENTS * sizeof(int));
+        cl::Buffer bufferB=cl::Buffer(context, CL_MEM_READ_ONLY, N_ELEMENTS * sizeof(int));
+        cl::Buffer bufferC=cl::Buffer(context, CL_MEM_WRITE_ONLY, N_ELEMENTS * sizeof(int));
 
-  clock_t begin = clock();
+        // Copy the input data to the input buffers using the command queue.
+        queue.enqueueWriteBuffer( bufferA, CL_FALSE, 0, N_ELEMENTS * sizeof(int), A.get() );
+        queue.enqueueWriteBuffer( bufferB, CL_FALSE, 0, N_ELEMENTS * sizeof(int), B.get() );
 
-  ret = clEnqueueTask(command_queue, kernel, 0, NULL, NULL);
+        // Read the program source
+        std::ifstream sourceFile("kernel/vector_add_kernel.cl");
+        std::string sourceCode( std::istreambuf_iterator<char>(sourceFile), (std::istreambuf_iterator<char>()));
+        cl::Program::Sources source(1, std::make_pair(sourceCode.c_str(), sourceCode.length()));
 
-  ret = clEnqueueReadBuffer(command_queue, memobj, CL_TRUE, 0, sizeof(cl_mem), val, 0, NULL, NULL);
+        // Make program from the source code
+        cl::Program program=cl::Program(context, source);
 
-  clock_t end = clock();
-  double runtime = (double)(end - begin) / CLOCKS_PER_SEC;
+        // Build the program for the devices
+        program.build(devices);
 
-  ret = clFlush(command_queue);
-  ret = clFinish(command_queue);
-  ret = clReleaseKernel(kernel);
-  ret = clReleaseProgram(program);
-  ret = clReleaseMemObject(memobj);
-  ret = clReleaseCommandQueue(command_queue);
-  ret = clReleaseContext(context);
+        // Make kernel
+        cl::Kernel vecadd_kernel(program, "vecadd");
 
-  printf("Result: %llu\n", val[0]);
-  printf("Runtime: %lfms\n", runtime);
-  
-  free(source_str);
+        // Set the kernel arguments
+        vecadd_kernel.setArg( 0, bufferA );
+        vecadd_kernel.setArg( 1, bufferB );
+        vecadd_kernel.setArg( 2, bufferC );
 
-  return 0;
+        // Execute the kernel
+        cl::NDRange global( N_ELEMENTS );
+        cl::NDRange local( 256 );
+        queue.enqueueNDRangeKernel( vecadd_kernel, cl::NullRange, global, local );
 
+        // Copy the output data back to the host
+        queue.enqueueReadBuffer( bufferC, CL_TRUE, 0, N_ELEMENTS * sizeof(int), C.get() );
+
+        // Verify the result
+        bool result=true;
+        for (int i=0; i<N_ELEMENTS; i ++)
+            if (C[i] !=A[i]+B[i]) {
+                result=false;
+                break;
+            }
+        if (result)
+            std::cout<< "Success!\n";
+        else
+            std::cout<< "Failed!\n";
+
+    }
+    catch(...) {
+        std::cout << "Error: Da ist was schief gelaufen" << std::endl;
+        return( EXIT_FAILURE );
+    }
+
+    std::cout << "Done.\n";
+    return( EXIT_SUCCESS );
 }
